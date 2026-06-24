@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Blok Şifreleme Modları</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="index_css.css">
+</head>
+<body>
+
+    <h1 style="color: var(--accent-color);">AES Blok Şifreleme Deney Paneli</h1>
+    <h3 style="color: #6c757d; margin-top: -10px;">Şamil Yazar & Nisa Nemli</h3>
+
+    <div class="controls">
+        <input type="file" id="imageLoader" accept="image/*"/>
+        <input type="text" id="masterKey" value="1234567890123456" maxlength="16" placeholder="16 Haneli Anahtar"/>
+        <select id="modeSelect" onchange="resetSim()">
+            <option value="ECB">ECB (Electronic Codebook)</option>
+            <option value="CBC">CBC (Cipher Block Chaining)</option>
+            <option value="CTR">CTR (Counter Mode)</option>
+        </select>
+        <button id="btnRun" onclick="runExperiment()">1. Deneyi Çalıştır</button>
+        <button id="btnNoise" onclick="injectBurstNoise()" disabled>2. Ağa Dalga Paraziti</button>
+        <button id="btnDecrypt" onclick="decryptAndShow()" disabled>3. Manuel Deşifre Et</button>
+        
+        <div id="timeDisplay" style="display:inline-block; vertical-align:middle; text-align:left; line-height:1.2; margin-left: 10px; font-size: 14px;"></div>
+    </div>
+
+    <div class="main-container">
+        <div class="panel">
+            <h4 style="color: var(--text-color); font-size: 15px;">1. Plaintext (Girdi)</h4>
+            <canvas id="cOrig"></canvas>
+        </div>
+
+        <div class="panel">
+            <div id="leakageTag" style="color: var(--danger); font-size: 12px; font-weight: bold; margin-bottom: 5px; display: none;">⚠️ PATTERN LEAKAGE</div>
+            <h4 style="color: var(--danger); font-size: 15px; margin-top: 5px;">2. Basit Şifreleme</h4>
+            <canvas id="cSimpleEnc"></canvas>
+        </div>
+
+        <div class="panel">
+            <h4 style="color: var(--success); font-size: 15px;">3. Alıcı (Deşifre)</h4>
+            <canvas id="cDec"></canvas>
+        </div>
+    </div>
+
+    <div class="analysis-container" id="analysisArea">
+        <div class="analysis-grid">
+            <div class="analysis-section">
+                <b>📌 Algoritma Karakteristiği</b>
+                <ul id="algoChar" style="font-size: 14px;">Mod seçildiğinde bilgiler yüklenecek.</ul>
+            </div>
+            <div class="analysis-section">
+                <b>🔍 Güvenlik ve Performans Analizi</b>
+                <ul id="perfChar" style="font-size: 14px;">Deney çıktısı bekleniyor.</ul>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const modData = {
+        ECB: {
+            char: [
+                "<b>Bağımsız İşleme:</b> Her blok diğerlerinden tamamen bağımsız olarak şifrelenir.",
+                "<b>Deterministik Yapı:</b> Aynı plaintext blokları daima aynı ciphertext sonuçlarını üretir.",
+                "<b>Zayıf Gizlilik:</b> Veri örüntülerini gizleyemediği için uzun mesajlar ve görseller için uygun değildir."
+            ],
+            perf: [
+                "<b>Hata Yayılımı:</b> Yok. Bir bloktaki hata sadece o bloğu etkiler.",
+                "<b>Paralelleştirme:</b> Tam uyumlu. Bloklar aynı anda işlenebilir.",
+                "<b>Risk:</b> Replay (Yineleme) saldırılarına karşı son derece hassastır."
+            ]
+        },
+        CBC: {
+            char: [
+                "<b>Zincirleme Yapı:</b> Her ciphertext bloğu kendinden önceki bloklara bağımlıdır.",
+                "<b>IV Kullanımı:</b> İlk blok için Rastgele Başlangıç Vektörü (IV) kullanılarak şifreleme nondeterministik hale getirilir.",
+                "<b>XOR Operasyonu:</b> Şifrelemeden önce plaintext, önceki ciphertext ile XOR işlemine girer."
+            ],
+            perf: [
+                "<b>Hata Yayılımı (Error Prop.):</b> Kritik. Bir ciphertext bloğundaki hata, sonraki bloğu tamamen bozar.",
+                "<b>Paralelleştirme:</b> Şifreleme sırasında yapılamaz (seri işlem), ancak deşifreleme paralel yapılabilir.",
+                "<b>Güvenlik:</b> Örüntü sızıntısını tamamen yok eder."
+            ]
+        },
+        CTR: {
+            char: [
+                "<b>Sayaç Temelli:</b> Blok şifreyi bir akış şifresine (stream cipher) dönüştürür.",
+                "<b>Keystream:</b> Sürekli değişen bir sayaç değeri şifrelenerek anahtar akışı üretilir.",
+                "<b>Nondeterministik:</b> Farklı sayaç/nonce değerleri aynı veri için farklı sonuçlar üretir."
+            ],
+            perf: [
+                "<b>Paralelleştirme:</b> En yüksek performans. Hem şifreleme hem deşifreleme tam paralel çalışır.",
+                "<b>Hata Yayılımı:</b> Yok. Ağdaki hata sadece vurduğu pikselin rengini inverte eder, yapıyı bozmaz.",
+                "<b>Rastgele Erişim:</b> Verinin istenilen bloğuna öncekileri çözmeden erişim mümkündür."
+            ]
+        }
+    };
+
+    let lastCipherData = null;
+    let lastIV = null;
+
+    function resetSim() {
+        const mode = document.getElementById('modeSelect').value;
+        document.getElementById('leakageTag').style.display = (mode === 'ECB') ? 'block' : 'none';
+        document.getElementById('algoChar').innerHTML = modData[mode].char.map(li => `<li>${li}</li>`).join('');
+        document.getElementById('perfChar').innerHTML = modData[mode].perf.map(li => `<li>${li}</li>`).join('');
+        
+        document.getElementById('btnNoise').disabled = true;
+        document.getElementById('btnDecrypt').disabled = true;
+        document.getElementById('timeDisplay').innerText = "";
+        lastCipherData = null;
+        ctxs.dec.clearRect(0, 0, imgW, imgH);
+    }
+    window.onload = resetSim;
+
+    const ctxs = {
+        orig: document.getElementById('cOrig').getContext('2d'),
+        simple: document.getElementById('cSimpleEnc').getContext('2d'),
+        dec: document.getElementById('cDec').getContext('2d')
+    };
+    let imgW = 280, imgH = 280, currentImgData = null;
+
+    document.getElementById('imageLoader').onchange = (e) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const img = new Image();
+            img.onload = () => {
+                Object.values(ctxs).forEach(c => { c.canvas.width = imgW; c.canvas.height = imgH; });
+                ctxs.orig.drawImage(img, 0, 0, imgW, imgH);
+                currentImgData = ctxs.orig.getImageData(0, 0, imgW, imgH);
+                resetSim();
+            };
+            img.src = ev.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+
+    function simpleEncrypt(pixels, key) {
+        const out = new Uint8ClampedArray(pixels.length);
+        const seed = key.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+        for(let i=0; i<pixels.length; i+=4) {
+            out[i] = (pixels[i] + (seed % 255)) % 256;
+            out[i+1] = (pixels[i+1] + (seed % 128)) % 256;
+            out[i+2] = (pixels[i+2] + (seed % 64)) % 256;
+            out[i+3] = 255;
+        }
+        return out;
+    }
+
+    function uint8ArrayToWordArray(u8arr) {
+        let words = [];
+        for (let i = 0; i < u8arr.length; i += 4) {
+            words.push((u8arr[i] << 24) | (u8arr[i+1] << 16) | (u8arr[i+2] << 8) | u8arr[i+3]);
+        }
+        return CryptoJS.lib.WordArray.create(words, u8arr.length);
+    }
+
+    function wordArrayToUint8Array(wordArray) {
+        let words = wordArray.words;
+        let sigBytes = wordArray.sigBytes;
+        let u8 = new Uint8Array(sigBytes);
+        for (let i = 0; i < sigBytes; i++) {
+            u8[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+        }
+        return u8;
+    }
+
+
+    function aesECB(pixelsOrCipher, key, isEncrypt) {
+        const keyWA = CryptoJS.enc.Utf8.parse(key);
+        
+        if(isEncrypt) {
+            const dataWA = uint8ArrayToWordArray(pixelsOrCipher);
+            const encrypted = CryptoJS.AES.encrypt(dataWA, keyWA, { 
+                mode: CryptoJS.mode.ECB, 
+                padding: CryptoJS.pad.NoPadding 
+            });
+            return encrypted.ciphertext.toString(CryptoJS.enc.Base64);
+        } else {
+            const decryptedWA = CryptoJS.AES.decrypt(
+                { ciphertext: CryptoJS.enc.Base64.parse(pixelsOrCipher) }, 
+                keyWA, 
+                { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.NoPadding }
+            );
+            return wordArrayToUint8Array(decryptedWA);
+        }
+    }
+
+    async function aesWebCrypto(data, keyRaw, mode, isEncrypt, iv = null) {
+        const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(keyRaw), { name: "AES-" + mode }, false, isEncrypt ? ["encrypt"] : ["decrypt"]);
+        let config = { name: "AES-" + mode };
+        if(mode === 'CBC') config.iv = iv || new Uint8Array(16);
+        if(mode === 'CTR') config.counter = iv || new Uint8Array(16), config.length = 128;
+        if(isEncrypt) { const enc = await crypto.subtle.encrypt(config, key, data); return new Uint8Array(enc); }
+        else { const dec = await crypto.subtle.decrypt(config, key, data); return new Uint8Array(dec); }
+    }
+
+    function fixAlphaAndDraw(decResult, ctx) {
+        let decClamped = new Uint8ClampedArray(decResult).subarray(0, imgW * imgH * 4);
+        for(let i=3; i<decClamped.length; i+=4) decClamped[i] = 255; 
+        ctx.putImageData(new ImageData(decClamped, imgW, imgH), 0, 0);
+    }
+
+    async function runExperiment() {
+        if(!currentImgData) {
+            alert("Lütfen önce bir görsel yükleyin.");
+            return;
+        }
+        const mode = document.getElementById('modeSelect').value;
+        const key = document.getElementById('masterKey').value;
+        const pixels = currentImgData.data;
+        const noise = new Uint8ClampedArray(pixels.length);
+        
+        for(let i=0; i<noise.length; i++) noise[i] = (i%4===3) ? 255 : Math.random()*255;
+
+        let t0 = performance.now();
+
+        try {
+            if(mode === 'ECB') {
+                ctxs.simple.putImageData(new ImageData(simpleEncrypt(pixels, key), imgW, imgH), 0, 0);
+                lastCipherData = aesECB(pixels, key, true); 
+            } else {
+                ctxs.simple.putImageData(new ImageData(noise, imgW, imgH), 0, 0);
+                lastIV = new Uint8Array(16); 
+                lastCipherData = await aesWebCrypto(pixels, key, mode, true, lastIV);
+            }
+
+            let t1 = performance.now();
+            document.getElementById('timeDisplay').innerHTML = `🔒 <span style="color:var(--success); font-weight:bold;">Şifreleme Bitti!</span><br>⏱ Hız: ${(t1 - t0).toFixed(1)} ms`;
+            
+            document.getElementById('btnNoise').disabled = false;
+            document.getElementById('btnDecrypt').disabled = false;
+            ctxs.dec.clearRect(0, 0, imgW, imgH);
+
+        } catch (e) { console.error(e); }
+    }
+
+    async function decryptAndShow() {
+        if (!lastCipherData) return;
+        
+        const mode = document.getElementById('modeSelect').value;
+        const key = document.getElementById('masterKey').value;
+        let t0 = performance.now();
+        let decResult;
+
+        try {
+            if (mode === 'ECB') {
+                decResult = aesECB(lastCipherData, key, false);
+            } else {
+                decResult = await aesWebCrypto(lastCipherData, key, mode, false, lastIV);
+            }
+
+            fixAlphaAndDraw(decResult, ctxs.dec);
+            
+            let t1 = performance.now();
+            document.getElementById('timeDisplay').innerHTML = `🔓 <span style="color:var(--accent-color); font-weight:bold;">Deşifre Tamamlandı!</span><br><span style="font-size:12px; color:#6c757d">Süre: ${(t1 - t0).toFixed(1)} ms</span>`;
+
+        } catch (e) {
+            console.error("Deşifre hatası:", e);
+            document.getElementById('timeDisplay').innerHTML = `❌ <span style="color:var(--danger)">Deşifre Hatası!</span><br><span style="font-size:12px; color:#6c757d">Padding veya veri bozulması olabilir.</span>`;
+            ctxs.dec.clearRect(0, 0, imgW, imgH);
+        }
+    }
+
+    async function injectBurstNoise() {
+        if (!lastCipherData) return;
+        const mode = document.getElementById('modeSelect').value;
+        const burstSize = imgW * 4 * 15;
+
+        try {
+            if (mode === 'ECB') {
+                let charArray = atob(lastCipherData).split('');
+                let offset = Math.floor(charArray.length / 2);
+                offset -= offset % 16; 
+                for(let i=0; i < burstSize && (offset+i) < charArray.length; i++) {
+                    charArray[offset + i] = String.fromCharCode(charArray[offset + i].charCodeAt(0) ^ 0xFF); 
+                }
+                lastCipherData = btoa(charArray.join(''));
+            } else {
+                let corrupted = new Uint8Array(lastCipherData);
+                let offset = Math.floor(corrupted.length / 2);
+                offset -= offset % 16; 
+                for(let i=0; i < burstSize && (offset+i) < corrupted.length; i++) {
+                    corrupted[offset + i] ^= 0xFF; 
+                }
+                lastCipherData = corrupted.buffer;
+            }
+
+            let errorMsg = mode === 'ECB' ? "Sadece vurulan bloklar (3 satır) bozulacak." :
+                           mode === 'CBC' ? "ZİNCİRLEME YAYILIM: 3 satır bozulacak ve parazit alt satırın ilk 4 pikseline sıçrayacak!" :
+                           "HATA YAYILIMI YOK: Parazit sadece vurulan yerin rengini değiştirecek.";
+                           
+            document.getElementById('timeDisplay').innerHTML = `⚠️ <span style="color:var(--danger); font-weight:bold;">AĞA PARAZİT EKLENDİ!</span><br><span style="font-size:12px; color:#6c757d">${errorMsg}<br>Sonucu görmek için <b>Deşifre Et</b> butonuna tıklayın.</span>`;
+
+        } catch(e) { console.error(e); }
+    }
+</script>
+</body>
+</html>
